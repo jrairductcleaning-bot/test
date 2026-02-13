@@ -1,21 +1,45 @@
 # Warehouse + Service Vehicle Inventory Tracker
 
-A lightweight command-line application to track inventory across:
-- One or more warehouses
-- One or more service vehicles
+A practical command-line inventory tool for:
+- Warehouses
+- Service vehicles (vans/trucks)
 
-It stores data in SQLite (`inventory.db` by default), so no external database is required.
+Data is stored in SQLite (`inventory.db` by default), so it runs on a normal laptop with no server setup.
 
-## Features
+## Make it usable day-to-day
 
-- Register warehouse and vehicle locations
-- Register inventory items with a minimum quantity threshold
-- Receive stock into any location
-- Transfer stock between warehouse and vehicles
-- Consume stock from a location (e.g., used during a service job)
-- Run full stock and low-stock reports
+### 1) Use guided mode (recommended for non-technical users)
 
-## Quick Start
+```bash
+python3 inventory_tracker.py interactive
+```
+
+This opens a numbered menu so your team can add items, move stock, and run reports without remembering commands.
+
+### 2) Keep one shared database file
+
+Use one file path consistently (for example on a shared drive):
+
+```bash
+python3 inventory_tracker.py --db /path/to/shared/inventory.db interactive
+```
+
+### 3) Create a simple desktop shortcut
+
+- **Windows**: create a `.bat` file that runs `python inventory_tracker.py --db C:\inventory\inventory.db interactive`
+- **Mac/Linux**: create a shell alias/script that runs the same command
+
+## Core features
+
+- Register warehouse/vehicle locations
+- Register inventory items with minimum levels
+- Receive stock
+- Transfer stock between locations
+- Consume stock for jobs
+- Full stock report and low-stock report
+- Movement history audit log
+
+## Quick start (CLI mode)
 
 ```bash
 python3 inventory_tracker.py --db inventory.db init
@@ -27,11 +51,16 @@ python3 inventory_tracker.py --db inventory.db transfer FILTER01 MainWarehouse V
 python3 inventory_tracker.py --db inventory.db consume FILTER01 Van-12 2 --note "Work order #854"
 python3 inventory_tracker.py --db inventory.db report
 python3 inventory_tracker.py --db inventory.db low-stock
+python3 inventory_tracker.py --db inventory.db history --limit 10
 ```
 
-## Command Reference
+## Command reference
 
 - `init`
+- `interactive`
+- `list-locations`
+- `list-items`
+- `history [--limit N]`
 - `add-location <name> <warehouse|vehicle>`
 - `add-item <sku> <name> [--min-qty N]`
 - `receive <sku> <location> <qty> [--note TEXT]`
@@ -43,5 +72,5 @@ python3 inventory_tracker.py --db inventory.db low-stock
 ## Notes
 
 - Quantities are integer units.
-- Transfers and consumption prevent negative stock.
-- All movement operations are recorded in a `moves` log table for auditing.
+- Stock cannot go negative.
+- Most commands auto-create DB tables if needed.

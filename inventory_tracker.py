@@ -5,10 +5,15 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Iterable
 
 DB_PATH = Path("inventory.db")
+
+
+class InventoryError(Exception):
+    """Base class for inventory application errors."""
 
 
 def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
@@ -74,14 +79,14 @@ def add_item(conn: sqlite3.Connection, sku: str, name: str, min_qty: int = 0) ->
 def _get_location_id(conn: sqlite3.Connection, name: str) -> int:
     row = conn.execute("SELECT id FROM locations WHERE name = ?", (name,)).fetchone()
     if not row:
-        raise ValueError(f"Unknown location: {name}")
+        raise InventoryError(f"Unknown location: {name}")
     return int(row["id"])
 
 
 def _get_item_id(conn: sqlite3.Connection, sku: str) -> int:
     row = conn.execute("SELECT id FROM items WHERE sku = ?", (sku,)).fetchone()
     if not row:
-        raise ValueError(f"Unknown SKU: {sku}")
+        raise InventoryError(f"Unknown SKU: {sku}")
     return int(row["id"])
 
 
@@ -93,7 +98,7 @@ def _change_stock(conn: sqlite3.Connection, location_id: int, item_id: int, delt
     current = int(row["qty"]) if row else 0
     new_qty = current + delta
     if new_qty < 0:
-        raise ValueError("Insufficient stock for operation")
+        raise InventoryError("Insufficient stock for operation")
 
     conn.execute(
         """
@@ -122,7 +127,7 @@ def transfer_stock(conn: sqlite3.Connection, sku: str, from_location: str, to_lo
     to_id = _get_location_id(conn, to_location)
 
     if from_id == to_id:
-        raise ValueError("Source and destination locations must be different")
+        raise InventoryError("Source and destination locations must be different")
 
     with conn:
         _change_stock(conn, from_id, item_id, -qty)
@@ -169,6 +174,37 @@ def low_stock_report(conn: sqlite3.Connection) -> Iterable[sqlite3.Row]:
     ).fetchall()
 
 
+def list_locations(conn: sqlite3.Connection) -> Iterable[sqlite3.Row]:
+    return conn.execute("SELECT name, kind FROM locations ORDER BY kind, name").fetchall()
+
+
+def list_items(conn: sqlite3.Connection) -> Iterable[sqlite3.Row]:
+    return conn.execute("SELECT sku, name, min_qty FROM items ORDER BY sku").fetchall()
+
+
+def movement_history(conn: sqlite3.Connection, limit: int = 20) -> Iterable[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT
+            m.id,
+            m.moved_at,
+            i.sku,
+            i.name AS item_name,
+            COALESCE(fl.name, '-') AS from_location,
+            COALESCE(tl.name, '-') AS to_location,
+            m.qty,
+            COALESCE(m.note, '') AS note
+        FROM moves m
+        JOIN items i ON i.id = m.item_id
+        LEFT JOIN locations fl ON fl.id = m.from_location_id
+        LEFT JOIN locations tl ON tl.id = m.to_location_id
+        ORDER BY m.id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+
 def _print_rows(rows: Iterable[sqlite3.Row]) -> None:
     rows = list(rows)
     if not rows:
@@ -193,12 +229,25 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+def non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be 0 or greater")
+    return parsed
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Track warehouse and service vehicle inventory")
     parser.add_argument("--db", type=Path, default=DB_PATH, help="Path to SQLite database")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init", help="Initialize database")
+    sub.add_parser("interactive", help="Run a guided menu-driven mode")
+    sub.add_parser("list-locations", help="List all locations")
+    sub.add_parser("list-items", help="List all items")
+
+    p = sub.add_parser("history", help="Show recent movement history")
+    p.add_argument("--limit", type=positive_int, default=20)
 
     p = sub.add_parser("add-location", help="Add location")
     p.add_argument("name")
@@ -207,7 +256,7 @@ def parse_args() -> argparse.Namespace:
     p = sub.add_parser("add-item", help="Add item")
     p.add_argument("sku")
     p.add_argument("name")
-    p.add_argument("--min-qty", type=int, default=0)
+    p.add_argument("--min-qty", type=non_negative_int, default=0)
 
     p = sub.add_parser("receive", help="Receive stock into a location")
     p.add_argument("sku")
@@ -234,32 +283,128 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _run_interactive(conn: sqlite3.Connection) -> None:
+    init_db(conn)
+    print("\nInventory Tracker (interactive mode)")
+    print("Type the number of the action you want.\n")
+
+    while True:
+        print(
+            """
+1) Add location
+2) Add item
+3) Receive stock
+4) Transfer stock
+5) Consume stock
+6) Show full stock report
+7) Show low-stock report
+8) List locations
+9) List items
+10) Show movement history
+0) Exit
+""".strip()
+        )
+        choice = input("\nChoice: ").strip()
+
+        try:
+            if choice == "1":
+                add_location(conn, input("Location name: ").strip(), input("Kind (warehouse/vehicle): ").strip())
+                print("✅ Location added")
+            elif choice == "2":
+                add_item(
+                    conn,
+                    input("SKU: ").strip(),
+                    input("Item name: ").strip(),
+                    int(input("Minimum quantity (0+): ").strip()),
+                )
+                print("✅ Item added")
+            elif choice == "3":
+                receive_stock(
+                    conn,
+                    input("SKU: ").strip(),
+                    input("Destination location: ").strip(),
+                    int(input("Quantity: ").strip()),
+                    input("Note (optional): ").strip() or None,
+                )
+                print("✅ Stock received")
+            elif choice == "4":
+                transfer_stock(
+                    conn,
+                    input("SKU: ").strip(),
+                    input("From location: ").strip(),
+                    input("To location: ").strip(),
+                    int(input("Quantity: ").strip()),
+                    input("Note (optional): ").strip() or None,
+                )
+                print("✅ Stock transferred")
+            elif choice == "5":
+                consume_stock(
+                    conn,
+                    input("SKU: ").strip(),
+                    input("Location: ").strip(),
+                    int(input("Quantity: ").strip()),
+                    input("Note (optional): ").strip() or None,
+                )
+                print("✅ Stock consumed")
+            elif choice == "6":
+                _print_rows(stock_report(conn))
+            elif choice == "7":
+                _print_rows(low_stock_report(conn))
+            elif choice == "8":
+                _print_rows(list_locations(conn))
+            elif choice == "9":
+                _print_rows(list_items(conn))
+            elif choice == "10":
+                _print_rows(movement_history(conn))
+            elif choice == "0":
+                print("Goodbye.")
+                return
+            else:
+                print("Please enter a valid menu option.")
+        except (ValueError, sqlite3.IntegrityError, InventoryError) as exc:
+            print(f"❌ {exc}")
+
+
 def main() -> None:
     args = parse_args()
     conn = connect(args.db)
 
-    if args.command == "init":
-        init_db(conn)
-        print(f"Database initialized at {args.db}")
-    elif args.command == "add-location":
-        add_location(conn, args.name, args.kind)
-        print("Location added")
-    elif args.command == "add-item":
-        add_item(conn, args.sku, args.name, args.min_qty)
-        print("Item added")
-    elif args.command == "receive":
-        receive_stock(conn, args.sku, args.location, args.qty, args.note)
-        print("Stock received")
-    elif args.command == "transfer":
-        transfer_stock(conn, args.sku, args.from_location, args.to_location, args.qty, args.note)
-        print("Stock transferred")
-    elif args.command == "consume":
-        consume_stock(conn, args.sku, args.location, args.qty, args.note)
-        print("Stock consumed")
-    elif args.command == "report":
-        _print_rows(stock_report(conn))
-    elif args.command == "low-stock":
-        _print_rows(low_stock_report(conn))
+    try:
+        if args.command == "init":
+            init_db(conn)
+            print(f"Database initialized at {args.db}")
+        elif args.command == "interactive":
+            _run_interactive(conn)
+        else:
+            init_db(conn)
+            if args.command == "add-location":
+                add_location(conn, args.name, args.kind)
+                print("Location added")
+            elif args.command == "add-item":
+                add_item(conn, args.sku, args.name, args.min_qty)
+                print("Item added")
+            elif args.command == "receive":
+                receive_stock(conn, args.sku, args.location, args.qty, args.note)
+                print("Stock received")
+            elif args.command == "transfer":
+                transfer_stock(conn, args.sku, args.from_location, args.to_location, args.qty, args.note)
+                print("Stock transferred")
+            elif args.command == "consume":
+                consume_stock(conn, args.sku, args.location, args.qty, args.note)
+                print("Stock consumed")
+            elif args.command == "report":
+                _print_rows(stock_report(conn))
+            elif args.command == "low-stock":
+                _print_rows(low_stock_report(conn))
+            elif args.command == "list-locations":
+                _print_rows(list_locations(conn))
+            elif args.command == "list-items":
+                _print_rows(list_items(conn))
+            elif args.command == "history":
+                _print_rows(movement_history(conn, args.limit))
+    except (InventoryError, sqlite3.IntegrityError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
