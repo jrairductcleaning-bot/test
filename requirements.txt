@@ -1,0 +1,5 @@
+# Example requirements.txt
+numpy
+pandas
+flask
+requests
